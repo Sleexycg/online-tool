@@ -1,97 +1,503 @@
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>公章透明化工具 (Seal Extractor)</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <style>
-        /* 强制使用 Inter 字体 */
-        body {
-            font-family: 'Inter', sans-serif;
-            background-color: #f7f9fb;
-        }
-        /* Canvas 样式，用于显示透明背景效果 */
-        .checkerboard {
-            background-image: linear-gradient(45deg, #ccc 25%, transparent 25%), 
-                              linear-gradient(-45deg, #ccc 25%, transparent 25%),
-                              linear-gradient(45deg, transparent 75%, #ccc 75%),
-                              linear-gradient(-45deg, transparent 75%, #ccc 75%);
-            background-size: 20px 20px;
-            background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
-        }
-    </style>
-</head>
-<body class="p-4 md:p-8 flex items-center justify-center min-h-screen">
+import React, { useState, useEffect, useRef } from 'react';
+import { Camera, MapPin, User, CheckCircle, XCircle, RefreshCw, ShieldCheck, List, LogOut, Moon } from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+// 修复: 导入 signInWithCustomToken 以便正确处理 Canvas 环境的认证
+import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth'; 
+import { getFirestore, collection, addDoc, query, orderBy, onSnapshot, serverTimestamp } from 'firebase/firestore';
 
-    <div class="w-full max-w-2xl bg-white rounded-xl shadow-2xl p-6 md:p-8 space-y-6">
+// --- Firebase Initialization ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'dorm-check-default';
+
+// --- Mock Target Location (Dormitory Coordinates) ---
+// In a real app, this would be fetched from a database based on the student's dorm building
+const TARGET_LOCATION = {
+  latitude: 39.9042, // Mock latitude
+  longitude: 116.4074, // Mock longitude
+  radius: 500 // meters allowed
+};
+
+// --- Helper: Calculate Distance (Haversine Formula) ---
+function getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2) {
+  const R = 6371; // Radius of the earth in km
+  const dLat = deg2rad(lat2 - lat1);
+  const dLon = deg2rad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(deg2rad(lat1)) * Math.cos(deg2rad(lat2)) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  const d = R * c; // Distance in km
+  return d * 1000; // Return in meters
+}
+
+function deg2rad(deg) {
+  return deg * (Math.PI / 180);
+}
+
+// --- Component: Main App ---
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [view, setView] = useState('login'); // login, student, admin
+  const [studentName, setStudentName] = useState('');
+  const [studentId, setStudentId] = useState('');
+
+  // 修复后的 Auth Effect
+  useEffect(() => {
+    const initAuth = async () => {
+        try {
+            // 优先使用 Canvas 环境提供的自定义令牌进行认证
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                await signInWithCustomToken(auth, __initial_auth_token);
+            } else {
+                // 如果没有令牌，则退回到匿名登录
+                await signInAnonymously(auth);
+            }
+        } catch (e) {
+            console.error("Firebase 认证失败:", e);
+            // 最终安全措施：尝试匿名登录
+            await signInAnonymously(auth); 
+        }
+    };
+    initAuth();
+    // 设置监听器以跟踪认证状态变化并更新 user state
+    const unsubscribe = onAuthStateChanged(auth, (u) => setUser(u));
+    return () => unsubscribe();
+  }, []); // 空依赖数组确保只运行一次
+
+  const handleLogin = (role) => {
+    if (role === 'student') {
+      if (!studentName || !studentId) return alert('请输入姓名和学号');
+      setView('student');
+    } else {
+      setView('admin');
+    }
+  };
+
+  const handleLogout = () => {
+    setView('login');
+    setStudentName('');
+    setStudentId('');
+  };
+
+  if (!user) return <div className="flex items-center justify-center h-screen text-blue-500">加载系统中...</div>;
+
+  return (
+    <div className="min-h-screen bg-gray-50 font-sans text-gray-800 max-w-md mx-auto shadow-2xl overflow-hidden relative border-x border-gray-200">
+      
+      {/* Header */}
+      <header className="bg-blue-600 text-white p-4 flex justify-between items-center shadow-md z-10 sticky top-0">
+        <div className="flex items-center gap-2">
+          <Moon size={20} className="text-yellow-300" />
+          <h1 className="text-lg font-bold tracking-wide">智慧查寝</h1>
+        </div>
+        {view !== 'login' && (
+          <button onClick={handleLogout} className="text-blue-100 hover:text-white text-sm flex items-center gap-1">
+            <LogOut size={16} /> 退出
+          </button>
+        )}
+      </header>
+
+      {/* Main Content */}
+      <main className="p-4 pb-20">
+        {view === 'login' && (
+          <LoginScreen 
+            setStudentName={setStudentName} 
+            setStudentId={setStudentId}
+            studentName={studentName}
+            studentId={studentId}
+            onLogin={handleLogin} 
+          />
+        )}
+        {view === 'student' && (
+          <StudentCheckIn 
+            user={user} 
+            name={studentName} 
+            sid={studentId} 
+            onSuccess={() => setView('success')}
+          />
+        )}
+        {view === 'admin' && <AdminDashboard user={user} />}
+        {view === 'success' && (
+            <SuccessScreen onBack={() => setView('login')} />
+        )}
+      </main>
+
+    </div>
+  );
+}
+
+// --- Sub-Component: Login Screen ---
+function LoginScreen({ onLogin, setStudentName, setStudentId, studentName, studentId }) {
+  const [role, setRole] = useState('student');
+
+  return (
+    <div className="flex flex-col gap-6 mt-8 animate-fade-in">
+      <div className="text-center space-y-2">
+        <div className="bg-blue-100 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-4">
+          <ShieldCheck size={40} className="text-blue-600" />
+        </div>
+        <h2 className="text-2xl font-bold text-gray-800">欢迎使用查寝系统</h2>
+        <p className="text-gray-500 text-sm">定位 + 拍照 + 实名认证</p>
+      </div>
+
+      <div className="bg-white p-1 rounded-lg border flex mb-4">
+        <button 
+          onClick={() => setRole('student')}
+          className={`flex-1 py-2 rounded-md text-sm font-medium transition-all ${role === 'student' ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-500'}`}
+        >
+          学生签到
+        </button>
+        <button 
+          onClick={() => setRole('admin')}
+          className={`flex-1 py-2 rounded-md text-sm font-medium transition-all ${role === 'admin' ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-500'}`}
+        >
+          宿管查房
+        </button>
+      </div>
+
+      {role === 'student' ? (
+        <div className="space-y-4">
+          <input
+            type="text"
+            placeholder="请输入姓名"
+            value={studentName}
+            onChange={(e) => setStudentName(e.target.value)}
+            className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
+          />
+          <input
+            type="text"
+            placeholder="请输入学号"
+            value={studentId}
+            onChange={(e) => setStudentId(e.target.value)}
+            className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
+          />
+        </div>
+      ) : (
+        <div className="p-4 bg-yellow-50 text-yellow-800 rounded-lg text-sm border border-yellow-200">
+          管理员模式无需输入账号，直接进入查看所有数据。
+        </div>
+      )}
+
+      <button
+        onClick={() => onLogin(role)}
+        className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3.5 rounded-xl shadow-lg transform active:scale-95 transition-all flex items-center justify-center gap-2"
+      >
+        {role === 'student' ? '开始签到' : '进入管理端'}
+      </button>
+    </div>
+  );
+}
+
+// --- Sub-Component: Student Check-In Flow ---
+function StudentCheckIn({ user, name, sid, onSuccess }) {
+  const [step, setStep] = useState(1); // 1: Location, 2: Camera, 3: Submitting
+  const [location, setLocation] = useState(null);
+  const [locError, setLocError] = useState(null);
+  const [photo, setPhoto] = useState(null);
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const [cameraStream, setCameraStream] = useState(null);
+
+  // Step 1: Get Location
+  const handleGetLocation = () => {
+    setLocError(null);
+    if (!navigator.geolocation) {
+      setLocError("您的浏览器不支持地理位置功能");
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const { latitude, longitude } = position.coords;
+        // Mock check distance logic (always pass for demo purposes mostly, or show warning)
+        const dist = getDistanceFromLatLonInKm(latitude, longitude, TARGET_LOCATION.latitude, TARGET_LOCATION.longitude);
         
-        <!-- Tool Header -->
-        <h1 class="text-3xl font-bold text-gray-800 flex items-center gap-3">
-            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-red-500"><circle cx="12" cy="12" r="10"/><path d="M12 2a4 4 0 0 0-4 4v3h8V6a4 4 0 0 0-4-4zM8 9v8a4 4 0 1 0 8 0V9z"/></svg>
-            公章提取工具
-        </h1>
-        <p class="text-gray-500">上传图片并点击印章区域，即可智能移除背景，生成透明 PNG。</p>
+        // In a real app, strict check: if (dist > TARGET_LOCATION.radius) ...
+        
+        setLocation({
+          lat: latitude,
+          lng: longitude,
+          distance: Math.round(dist),
+          timestamp: new Date().toLocaleString()
+        });
+        setStep(2);
+      },
+      (error) => {
+        console.error(error);
+        setLocError("无法获取位置，请检查手机GPS设置或浏览器权限。");
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+    );
+  };
 
-        <!-- Step 1: File Upload -->
-        <div class="space-y-3">
-            <label class="block text-sm font-medium text-gray-700">步骤 1: 上传文件</label>
-            <input type="file" id="imageUpload" accept="image/*" class="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" />
+  // Step 2: Camera
+  useEffect(() => {
+    if (step === 2) {
+      startCamera();
+    }
+    return () => stopCamera();
+  }, [step]);
+
+  const startCamera = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { facingMode: 'user' },
+        audio: false 
+      });
+      setCameraStream(stream);
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+      }
+    } catch (err) {
+      console.error("Camera Error:", err);
+      alert("无法启动摄像头，请允许访问权限。");
+    }
+  };
+
+  const stopCamera = () => {
+    if (cameraStream) {
+      cameraStream.getTracks().forEach(track => track.stop());
+      setCameraStream(null);
+    }
+  };
+
+  const takePhoto = () => {
+    if (videoRef.current && canvasRef.current) {
+      const context = canvasRef.current.getContext('2d');
+      // Set canvas dimensions to match video
+      canvasRef.current.width = videoRef.current.videoWidth;
+      canvasRef.current.height = videoRef.current.videoHeight;
+      // Draw
+      context.drawImage(videoRef.current, 0, 0);
+      // Add timestamp watermark
+      context.font = "20px Arial";
+      context.fillStyle = "white";
+      context.fillText(new Date().toLocaleString(), 20, 40);
+      context.fillText(`${name} (${sid})`, 20, 70);
+
+      const dataUrl = canvasRef.current.toDataURL('image/jpeg', 0.8);
+      setPhoto(dataUrl);
+      stopCamera();
+      setStep(3);
+    }
+  };
+
+  // Step 3: Submit
+  const handleSubmit = async () => {
+    if (!user || !location || !photo) return;
+
+    try {
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'checkins'), {
+        studentName: name,
+        studentId: sid,
+        location: location,
+        photoBase64: photo, // Storing base64 directly for demo simplicity (1MB limit!)
+        timestamp: serverTimestamp(),
+        status: 'On Time'
+      });
+      onSuccess();
+    } catch (e) {
+      console.error("Submission failed", e);
+      alert("提交失败，请重试: " + e.message);
+    }
+  };
+
+  const retake = () => {
+    setPhoto(null);
+    setStep(2);
+  };
+
+  return (
+    <div className="flex flex-col h-full animate-fade-in">
+        {/* Progress Bar */}
+        <div className="flex justify-between mb-6 px-2">
+            {[1, 2, 3].map(i => (
+                <div key={i} className={`h-2 flex-1 mx-1 rounded-full ${step >= i ? 'bg-blue-600' : 'bg-gray-200'}`} />
+            ))}
         </div>
 
-        <!-- Step 2: Interactive Canvas -->
-        <div id="canvasContainer" class="hidden space-y-3">
-            <label class="block text-sm font-medium text-gray-700">步骤 2: 点击印章颜色进行采样</label>
-            <div class="checkerboard rounded-lg overflow-hidden border-2 border-gray-300 shadow-inner">
-                <canvas id="originalCanvas" class="w-full cursor-pointer"></canvas>
+        {/* Step 1: Location */}
+        {step === 1 && (
+            <div className="flex-1 flex flex-col items-center justify-center space-y-6 text-center">
+                <div className="w-32 h-32 bg-blue-50 rounded-full flex items-center justify-center animate-pulse">
+                    <MapPin size={64} className="text-blue-500" />
+                </div>
+                <div>
+                    <h3 className="text-xl font-bold text-gray-800">步骤 1: 定位校验</h3>
+                    <p className="text-gray-500 text-sm mt-2 px-8">系统将获取您的GPS信息以确认您在宿舍区域。</p>
+                </div>
+                {locError && <div className="text-red-500 bg-red-50 p-3 rounded text-sm max-w-xs">{locError}</div>}
+                
+                <button onClick={handleGetLocation} className="w-full bg-blue-600 text-white py-3 rounded-xl font-semibold shadow-lg active:scale-95 transition-transform">
+                    获取当前位置
+                </button>
             </div>
-            <p id="clickInfo" class="text-sm text-blue-600 font-medium"></p>
-        </div>
+        )}
 
-        <!-- Step 3: Result and Download -->
-        <div id="resultContainer" class="hidden space-y-3">
-            <label class="block text-sm font-medium text-gray-700">步骤 3: 提取结果 (透明背景)</label>
-            <div class="checkerboard rounded-lg p-2 border-2 border-gray-300 flex justify-center items-center">
-                <canvas id="resultCanvas" class="max-w-full h-auto"></canvas>
+        {/* Step 2: Camera */}
+        {step === 2 && !photo && (
+            <div className="flex-1 flex flex-col relative bg-black rounded-xl overflow-hidden shadow-xl">
+                <video ref={videoRef} autoPlay playsInline className="absolute inset-0 w-full h-full object-cover" />
+                <canvas ref={canvasRef} className="hidden" />
+                
+                {/* Overlays */}
+                <div className="absolute top-4 left-4 right-4 z-10">
+                   <div className="bg-black/50 text-white px-3 py-1 rounded-full text-xs inline-flex items-center gap-1 backdrop-blur-sm">
+                        <MapPin size={12} /> 
+                        {location ? `已定位: 误差 ${location.distance}m` : '定位中...'}
+                   </div>
+                </div>
+
+                <div className="absolute inset-0 pointer-events-none border-2 border-white/30 rounded-xl">
+                    <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-48 h-64 border-2 border-dashed border-yellow-400 rounded-full opacity-70"></div>
+                    <div className="absolute bottom-24 w-full text-center text-white/80 text-sm">请将面部对准框内</div>
+                </div>
+
+                <div className="absolute bottom-0 w-full p-6 flex justify-center bg-gradient-to-t from-black/80 to-transparent">
+                    <button onClick={takePhoto} className="w-16 h-16 rounded-full bg-white border-4 border-gray-300 shadow-lg flex items-center justify-center active:scale-90 transition-all">
+                        <div className="w-14 h-14 rounded-full bg-white border-2 border-black"></div>
+                    </button>
+                </div>
             </div>
-            
-            <button id="downloadButton" disabled class="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-3 rounded-lg transition duration-150 disabled:bg-green-300 shadow-md flex items-center justify-center gap-2">
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
-                下载透明公章 (PNG)
+        )}
+
+        {/* Step 3: Confirmation */}
+        {step >= 2 && photo && (
+            <div className="flex-1 flex flex-col space-y-4">
+                <div className="relative rounded-xl overflow-hidden shadow-md aspect-[3/4] bg-gray-100">
+                    <img src={photo} alt="Capture" className="w-full h-full object-cover" />
+                    <div className="absolute bottom-0 w-full bg-black/60 p-2 text-white text-xs">
+                        <p>📍 经度: {location.lng.toFixed(4)}</p>
+                        <p>📍 纬度: {location.lat.toFixed(4)}</p>
+                        <p>🕒 时间: {location.timestamp}</p>
+                    </div>
+                </div>
+
+                <div className="space-y-3">
+                    <button onClick={handleSubmit} className="w-full bg-green-600 hover:bg-green-700 text-white py-3 rounded-xl font-bold shadow-lg active:scale-95 transition-transform flex items-center justify-center gap-2">
+                        <CheckCircle size={20} /> 确认并提交
+                    </button>
+                    <button onClick={retake} className="w-full bg-white border border-gray-300 text-gray-700 py-3 rounded-xl font-semibold shadow-sm active:scale-95 transition-transform flex items-center justify-center gap-2">
+                        <RefreshCw size={18} /> 重新拍摄
+                    </button>
+                </div>
+            </div>
+        )}
+    </div>
+  );
+}
+
+// --- Sub-Component: Success Screen ---
+function SuccessScreen({ onBack }) {
+    return (
+        <div className="flex flex-col items-center justify-center h-[80vh] text-center space-y-6 animate-fade-in">
+            <div className="w-24 h-24 bg-green-100 rounded-full flex items-center justify-center text-green-600 animate-bounce">
+                <CheckCircle size={60} />
+            </div>
+            <div>
+                <h2 className="text-2xl font-bold text-gray-800">签到成功!</h2>
+                <p className="text-gray-500 mt-2">您的查寝数据已上传至云端。</p>
+            </div>
+            <button onClick={onBack} className="mt-8 text-blue-600 font-medium hover:underline">
+                返回首页
             </button>
         </div>
+    )
+}
+
+// --- Sub-Component: Admin Dashboard ---
+function AdminDashboard({ user }) {
+  const [checkins, setCheckins] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    // 确保用户已认证，即使是匿名用户，也应该有 UID
+    if (!user || !user.uid) return; 
+    
+    // Query Public Collection
+    const q = query(
+        collection(db, 'artifacts', appId, 'public', 'data', 'checkins'),
+        orderBy('timestamp', 'desc')
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setCheckins(data);
+      setLoading(false);
+    }, (error) => {
+        console.error("Error fetching checkins:", error);
+        setLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  return (
+    <div className="animate-fade-in">
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
+            <List size={20} /> 实时查寝记录
+        </h2>
+        <span className="bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded-full font-medium">
+            共 {checkins.length} 人
+        </span>
+      </div>
+
+      {loading ? (
+        <div className="space-y-3">
+            {[1,2,3].map(i => <div key={i} className="h-20 bg-gray-200 rounded-lg animate-pulse" />)}
+        </div>
+      ) : checkins.length === 0 ? (
+        <div className="text-center py-10 text-gray-400">
+            暂无签到数据
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {checkins.map(item => (
+            <div key={item.id} className="bg-white rounded-xl shadow-sm border border-gray-100 p-3 flex gap-4 items-start">
+              {/* Thumbnail */}
+              <div className="w-16 h-16 rounded-lg bg-gray-200 flex-shrink-0 overflow-hidden cursor-pointer hover:opacity-90">
+                {item.photoBase64 ? (
+                    <img src={item.photoBase64} className="w-full h-full object-cover" alt="face" />
+                ) : (
+                    <User className="w-full h-full p-4 text-gray-400" />
+                )}
+              </div>
+              
+              {/* Info */}
+              <div className="flex-1 min-w-0">
+                <div className="flex justify-between items-start">
+                    <div>
+                        <h3 className="font-bold text-gray-900 truncate">{item.studentName}</h3>
+                        <p className="text-xs text-gray-500">{item.studentId}</p>
+                    </div>
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                        {item.status}
+                    </span>
+                </div>
+                
+                <div className="mt-2 text-xs text-gray-400 flex flex-col gap-0.5">
+                    <div className="flex items-center gap-1">
+                        <MapPin size={10} /> 
+                        {item.location?.lat.toFixed(4)}, {item.location?.lng.toFixed(4)}
+                    </div>
+                    <div className="flex items-center gap-1">
+                        <CheckCircle size={10} /> 
+                        {item.timestamp ? new Date(item.timestamp.seconds * 1000).toLocaleString() : 'Just now'}
+                    </div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
-
-    <script>
-        const imageUpload = document.getElementById('imageUpload');
-        const originalCanvas = document.getElementById('originalCanvas');
-        const resultCanvas = document.getElementById('resultCanvas');
-        const canvasContainer = document.getElementById('canvasContainer');
-        const resultContainer = document.getElementById('resultContainer');
-        const downloadButton = document.getElementById('downloadButton');
-        const clickInfo = document.getElementById('clickInfo');
-        
-        let originalImage = null;
-        let targetColor = null; // Stores {r, g, b} of the sampled seal color
-
-        /**
-         * Loads the uploaded image onto the original canvas.
-         */
-        imageUpload.addEventListener('change', (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
-
-            const reader = new FileReader();
-            reader.onload = (event) => {
-                const img = new Image();
-                img.onload = () => {
-                    originalImage = img;
-                    
-                    // Reset state
-                    targetColor = null;
-                    downloadButton.disabled = true;
-                    clickInfo.textContent = '请在图片上点击印章（红色或蓝色）区域进行采样...';
-
-                    // Set canvas dimensions
-                    originalCanvas.width = img.width;
-         
+  );
+}
