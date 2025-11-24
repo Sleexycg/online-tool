@@ -1,521 +1,454 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Camera, MapPin, User, CheckCircle, List, LogOut, ShieldCheck, AlertTriangle } from 'lucide-react';
-import { initializeApp } from 'firebase/app';
-// 确保导入 signInWithCustomToken 用于 Canvas 环境的认证
-import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth'; 
-import { getFirestore, collection, addDoc, query, orderBy, onSnapshot, serverTimestamp } from 'firebase/firestore';
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能查寝系统</title>
+    <style>
+        /* CSS 样式 */
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; background-color: #f4f7f6; color: #333; }
+        .container { max-width: 900px; margin: 0 auto; background: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); }
+        h1, h2 { color: #007bff; border-bottom: 2px solid #e9ecef; padding-bottom: 10px; margin-bottom: 20px; }
+        input[type="text"], input[type="file"], button, select { padding: 10px; margin-bottom: 15px; border: 1px solid #ccc; border-radius: 4px; width: 100%; box-sizing: border-box; }
+        button { background-color: #28a745; color: white; cursor: pointer; border: none; transition: background-color 0.3s; }
+        button:hover:not(:disabled) { background-color: #218838; }
+        button:disabled { background-color: #6c757d; cursor: not-allowed; }
+        #student-view, #teacher-view { display: none; }
+        .view-switch { margin-bottom: 30px; }
+        .view-switch button { width: auto; margin-right: 10px; background-color: #6c757d; }
+        .view-switch button.active { background-color: #007bff; }
 
-// --- 全局配置与 Firebase 初始化 ---
-// 尝试从环境中获取配置，否则使用空对象
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'dorm-check-default';
+        /* 学生端特定样式 */
+        #video-container { display: flex; justify-content: center; margin-bottom: 15px; }
+        #video, #photo-canvas { width: 100%; max-width: 400px; border: 1px solid #ddd; background: #eee; }
+        #photo-preview img { max-width: 100%; border-radius: 4px; margin-top: 15px; }
+        .info-box { padding: 15px; background-color: #eaf5ff; border: 1px solid #cce5ff; border-radius: 4px; margin-bottom: 15px; }
 
-// 目标宿舍楼的模拟坐标 (请自行替换为实际学校的中心坐标)
-const TARGET_LOCATION = {
-  latitude: 39.9042, // 北京 Mock 坐标
-  longitude: 116.4074, 
-  radius: 500 // 允许误差 500 米
-};
+        /* 教师端特定样式 */
+        #checkin-list { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        #checkin-list th, #checkin-list td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        #checkin-list th { background-color: #007bff; color: white; }
+        .preview-img { max-width: 150px; height: auto; display: block; margin: 5px 0; }
+        .data-buttons button { background-color: #17a2b8; margin-bottom: 5px; }
+    </style>
+</head>
+<body>
 
-// --- 辅助函数 ---
+    <div class="container">
+        <h1>🏠 智能查寝签到系统</h1>
 
-// Haversine 公式计算两点间距离（单位：米）
-function getDistanceFromLatLonInMeters(lat1, lon1, lat2, lon2) {
-  const R = 6371000; // 地球半径（米）
-  const dLat = deg2rad(lat2 - lat1);
-  const dLon = deg2rad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(deg2rad(lat1)) * Math.cos(deg2rad(lat2)) *
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-function deg2rad(deg) { return deg * (Math.PI / 180); }
+        <div class="view-switch">
+            <button id="switch-student" class="active">学生签到端</button>
+            <button id="switch-teacher">教师管理端</button>
+        </div>
 
+        <div id="student-view">
+            <h2>👤 学生签到</h2>
+            <input type="text" id="student-name" placeholder="请输入姓名" required>
+            <input type="text" id="student-id" placeholder="请输入学号" required>
 
-// --- 主应用组件 ---
-export default function App() {
-  const [fbServices, setFbServices] = useState(null); // 存储 auth, db 实例
-  const [user, setUser] = useState(null);
-  const [view, setView] = useState('login'); // login, student, admin, success
-  const [studentName, setStudentName] = useState('');
-  const [studentId, setStudentId] = useState('');
-  const [isInitializing, setIsInitializing] = useState(true);
+            <div class="info-box">
+                <strong>📍 当前定位：</strong> <span id="location-status">等待获取定位...</span>
+                <button id="get-location-btn">重新获取定位</button>
+                <p id="coords-display" style="margin: 5px 0 0 0; font-size: 0.9em;"></p>
+            </div>
 
-  // 初始化 Firebase 和认证
-  useEffect(() => {
-    let unsubscribeAuth = () => {};
-    
-    const initApp = async () => {
-        try {
-            const app = initializeApp(firebaseConfig);
-            const auth = getAuth(app);
-            const db = getFirestore(app);
-            setFbServices({ auth, db });
-
-            // 优先使用 Canvas 环境提供的令牌认证，确保权限
-            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                await signInWithCustomToken(auth, __initial_auth_token);
-            } else {
-                // 如果没有令牌，则匿名登录
-                await signInAnonymously(auth);
-            }
+            <div id="video-container">
+                <video id="video" autoplay></video>
+                <canvas id="photo-canvas" style="display: none;"></canvas>
+            </div>
+            <button id="start-camera-btn">开启摄像头</button>
+            <button id="take-photo-btn" disabled>拍照</button>
             
-            // 监听认证状态变化
-            unsubscribeAuth = onAuthStateChanged(auth, (u) => {
-                setUser(u);
-                setIsInitializing(false);
-            });
-        } catch (e) {
-            console.error("Firebase 初始化或认证失败:", e);
-            alert("系统初始化失败，请检查配置或网络。");
-            setIsInitializing(false);
-        }
-    };
-    
-    initApp();
-    return () => unsubscribeAuth();
-  }, []);
-
-  const handleLogin = (role) => {
-    if (role === 'student') {
-      if (!studentName || !studentId) return alert('请先输入姓名和学号');
-      setView('student');
-    } else {
-      setView('admin');
-    }
-  };
-
-  const handleLogout = async () => {
-    setView('login');
-    setStudentName('');
-    setStudentId('');
-    // 可以选择登出，但为了简化，我们只切换视图
-    // await fbServices.auth.signOut(); 
-  };
-
-  if (isInitializing || !user || !fbServices) {
-    return (
-      <div className="flex items-center justify-center h-screen text-blue-500 bg-gray-50">
-        <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-        <p className="ml-4 font-medium">系统初始化中...</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="min-h-screen bg-gray-50 font-sans text-gray-800 max-w-md mx-auto shadow-2xl overflow-hidden relative border-x border-gray-100">
-      
-      {/* 顶部导航栏 */}
-      <header className="bg-blue-600 text-white p-4 pt-8 flex justify-between items-center shadow-lg sticky top-0 z-20">
-        <div className="flex items-center gap-2">
-          <ShieldCheck size={20} className="text-white" />
-          <h1 className="text-lg font-bold tracking-wide">智能查寝平台</h1>
+            <div id="photo-preview"></div>
+            
+            <button id="checkin-btn" disabled>✅ 签到</button>
+            <p id="checkin-message" style="color: green; font-weight: bold;"></p>
         </div>
-        {view !== 'login' && (
-          <button onClick={handleLogout} className="text-blue-100 hover:text-white text-sm flex items-center gap-1 transition-colors">
-            <LogOut size={16} /> 退出
-          </button>
-        )}
-      </header>
 
-      {/* 主内容区域 */}
-      <main className="p-4 pb-20">
-        {view === 'login' && (
-          <LoginScreen 
-            setStudentName={setStudentName} 
-            setStudentId={setStudentId}
-            studentName={studentName}
-            studentId={studentId}
-            onLogin={handleLogin} 
-          />
-        )}
-        {view === 'student' && (
-          <StudentCheckIn 
-            db={fbServices.db}
-            appId={appId}
-            name={studentName} 
-            sid={studentId} 
-            onSuccess={() => setView('success')}
-          />
-        )}
-        {view === 'admin' && <AdminDashboard db={fbServices.db} appId={appId} />}
-        {view === 'success' && (
-            <SuccessScreen onBack={() => setView('login')} />
-        )}
-      </main>
+        <div id="teacher-view">
+            <h2>🧑‍🏫 教师管理</h2>
+
+            <div class="data-buttons">
+                <h3>数据操作（本地浏览器存储）</h3>
+                <button id="export-data-btn">💾 导出签到数据 (JSON)</button>
+                <p>导入数据：请选择学生导出的 JSON 文件</p>
+                <input type="file" id="import-data-file" accept=".json">
+                <button id="clear-data-btn" style="background-color: #dc3545;">🗑️ 清空本地签到数据</button>
+            </div>
+
+            <h3>📊 签到记录</h3>
+            <table id="checkin-list">
+                <thead>
+                    <tr>
+                        <th>姓名</th>
+                        <th>学号</th>
+                        <th>时间</th>
+                        <th>经纬度</th>
+                        <th>位置</th>
+                        <th>照片</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    </tbody>
+            </table>
+        </div>
     </div>
-  );
-}
 
-// --- 登录/角色选择组件 ---
-function LoginScreen({ onLogin, setStudentName, setStudentId, studentName, studentId }) {
-  const [role, setRole] = useState('student');
-
-  return (
-    <div className="flex flex-col gap-6 mt-8 animate-in fade-in duration-500">
-      <div className="text-center space-y-2">
-        <div className="bg-blue-100 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-4">
-          <User size={40} className="text-blue-600" />
-        </div>
-        <h2 className="text-2xl font-bold text-gray-800">选择用户身份</h2>
-      </div>
-
-      <div className="bg-white p-1 rounded-xl border border-gray-200 flex shadow-sm">
-        <button 
-          onClick={() => setRole('student')}
-          className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${role === 'student' ? 'bg-blue-600 text-white shadow-md' : 'text-gray-500'}`}
-        >
-          学生签到
-        </button>
-        <button 
-          onClick={() => setRole('admin')}
-          className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${role === 'admin' ? 'bg-blue-600 text-white shadow-md' : 'text-gray-500'}`}
-        >
-          宿管/教师查房
-        </button>
-      </div>
-
-      {role === 'student' && (
-        <div className="space-y-4">
-          <input
-            type="text"
-            placeholder="姓名"
-            value={studentName}
-            onChange={(e) => setStudentName(e.target.value)}
-            className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition-all"
-          />
-          <input
-            type="text"
-            placeholder="学号"
-            value={studentId}
-            onChange={(e) => setStudentId(e.target.value)}
-            className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition-all"
-          />
-        </div>
-      )}
-
-      <button
-        onClick={() => onLogin(role)}
-        className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3.5 rounded-xl shadow-lg shadow-blue-300 transform active:scale-98 transition-all"
-      >
-        {role === 'student' ? '开始签到' : '进入管理平台'}
-      </button>
-    </div>
-  );
-}
-
-// --- 学生查寝组件 ---
-function StudentCheckIn({ db, appId, name, sid, onSuccess }) {
-  const [step, setStep] = useState(1); // 1:定位, 2:拍照, 3:确认
-  const [location, setLocation] = useState(null);
-  const [statusMsg, setStatusMsg] = useState('请获取您的当前位置...');
-  const [photo, setPhoto] = useState(null);
-  const videoRef = useRef(null);
-  const canvasRef = useRef(null);
-  const [cameraStream, setCameraStream] = useState(null);
-
-  // 步骤 1: 获取位置
-  const handleGetLocation = () => {
-    setStatusMsg('正在获取 GPS 信息...');
-    if (!navigator.geolocation) {
-      setStatusMsg("浏览器不支持地理位置功能。");
-      return;
-    }
-
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        const { latitude, longitude } = position.coords;
-        const dist = getDistanceFromLatLonInMeters(latitude, longitude, TARGET_LOCATION.latitude, TARGET_LOCATION.longitude);
+    <script>
+        // JavaScript 逻辑
+        const studentView = document.getElementById('student-view');
+        const teacherView = document.getElementById('teacher-view');
+        const switchStudentBtn = document.getElementById('switch-student');
+        const switchTeacherBtn = document.getElementById('switch-teacher');
         
-        const isNear = dist <= TARGET_LOCATION.radius;
-        const distMsg = `距离目标点：${Math.round(dist)}米`;
+        // --- 学生端元素 ---
+        const studentNameInput = document.getElementById('student-name');
+        const studentIdInput = document.getElementById('student-id');
+        const locationStatus = document.getElementById('location-status');
+        const coordsDisplay = document.getElementById('coords-display');
+        const getLocationBtn = document.getElementById('get-location-btn');
+        const video = document.getElementById('video');
+        const photoCanvas = document.getElementById('photo-canvas');
+        const startCameraBtn = document.getElementById('start-camera-btn');
+        const takePhotoBtn = document.getElementById('take-photo-btn');
+        const photoPreview = document.getElementById('photo-preview');
+        const checkinBtn = document.getElementById('checkin-btn');
+        const checkinMessage = document.getElementById('checkin-message');
 
-        if (!isNear) {
-            setStatusMsg(`定位失败：${distMsg}，您不在指定宿舍区域。`);
-            // 真实应用中此处应阻止进入下一步
-        } else {
-            setStatusMsg(`定位成功：${distMsg}。请继续拍照。`);
-            setLocation({
-                lat: latitude,
-                lng: longitude,
-                distance: Math.round(dist),
-                inZone: isNear
+        // --- 教师端元素 ---
+        const checkinListBody = document.querySelector('#checkin-list tbody');
+        const exportDataBtn = document.getElementById('export-data-btn');
+        const importDataFile = document.getElementById('import-data-file');
+        const clearDataBtn = document.getElementById('clear-data-btn');
+
+        // --- 状态变量 ---
+        let currentPosition = null;
+        let photoDataURL = null;
+        let videoStream = null;
+
+        // =======================================================
+        // 1. 视图切换
+        // =======================================================
+
+        function setView(view) {
+            if (view === 'student') {
+                studentView.style.display = 'block';
+                teacherView.style.display = 'none';
+                switchStudentBtn.classList.add('active');
+                switchTeacherBtn.classList.remove('active');
+            } else {
+                studentView.style.display = 'none';
+                teacherView.style.display = 'block';
+                switchStudentBtn.classList.remove('active');
+                switchTeacherBtn.classList.add('active');
+                renderCheckinList(); // 切换到教师端时刷新列表
+            }
+        }
+
+        switchStudentBtn.addEventListener('click', () => setView('student'));
+        switchTeacherBtn.addEventListener('click', () => setView('teacher'));
+
+        // =======================================================
+        // 2. 定位功能 (Geolocation API)
+        // =======================================================
+
+        function updateCheckinButtonState() {
+            const hasCoords = !!currentPosition;
+            const hasPhoto = !!photoDataURL;
+            const hasName = studentNameInput.value.trim().length > 0;
+            const hasId = studentIdInput.value.trim().length > 0;
+            checkinBtn.disabled = !(hasCoords && hasPhoto && hasName && hasId);
+        }
+
+        function getLocation() {
+            locationStatus.textContent = '正在获取高精度定位...';
+            currentPosition = null;
+            updateCheckinButtonState();
+
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(
+                    (position) => {
+                        currentPosition = {
+                            latitude: position.coords.latitude,
+                            longitude: position.coords.longitude,
+                            accuracy: position.coords.accuracy
+                        };
+                        locationStatus.textContent = '✅ 定位成功！';
+                        coordsDisplay.textContent = `经度: ${currentPosition.longitude.toFixed(6)}, 纬度: ${currentPosition.latitude.toFixed(6)} (精度: ${currentPosition.accuracy.toFixed(2)}米)`;
+                        // 触发一次反向地理编码获取地址 (需要借助第三方服务或API，但静态部署中我们省略这一步，仅显示经纬度)
+                        updateCheckinButtonState();
+                    },
+                    (error) => {
+                        locationStatus.textContent = `❌ 定位失败: ${error.message}`;
+                        coordsDisplay.textContent = '请确保您允许浏览器访问定位权限。';
+                        currentPosition = null;
+                        updateCheckinButtonState();
+                    },
+                    {
+                        enableHighAccuracy: true,
+                        timeout: 10000,
+                        maximumAge: 0
+                    }
+                );
+            } else {
+                locationStatus.textContent = '❌ 您的浏览器不支持地理定位功能。';
+            }
+        }
+
+        getLocationBtn.addEventListener('click', getLocation);
+
+        // 初始化时获取一次定位
+        getLocation();
+
+        // 监听输入框变化
+        studentNameInput.addEventListener('input', updateCheckinButtonState);
+        studentIdInput.addEventListener('input', updateCheckinButtonState);
+
+        // =======================================================
+        // 3. 拍照功能 (MediaDevices API)
+        // =======================================================
+
+        async function startCamera() {
+            try {
+                // 优先使用后置/用户摄像头
+                videoStream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: { exact: "environment" } }, 
+                    audio: false 
+                });
+            } catch (e) {
+                try {
+                    // 如果后置失败，尝试任意摄像头
+                    videoStream = await navigator.mediaDevices.getUserMedia({ 
+                        video: true, 
+                        audio: false 
+                    });
+                } catch (err) {
+                    alert('无法访问摄像头。请检查权限设置。');
+                    console.error("Camera access error:", err);
+                    return;
+                }
+            }
+            video.srcObject = videoStream;
+            video.play();
+            takePhotoBtn.disabled = false;
+            startCameraBtn.textContent = '关闭摄像头';
+            startCameraBtn.classList.add('active'); // 视觉提示摄像头已开
+            video.style.display = 'block';
+            photoPreview.innerHTML = '';
+            photoDataURL = null;
+            updateCheckinButtonState();
+        }
+
+        function stopCamera() {
+            if (videoStream) {
+                videoStream.getTracks().forEach(track => track.stop());
+                videoStream = null;
+            }
+            video.srcObject = null;
+            takePhotoBtn.disabled = true;
+            startCameraBtn.textContent = '开启摄像头';
+            startCameraBtn.classList.remove('active');
+            video.style.display = 'none';
+        }
+
+        startCameraBtn.addEventListener('click', () => {
+            if (videoStream) {
+                stopCamera();
+            } else {
+                startCamera();
+            }
+        });
+
+        takePhotoBtn.addEventListener('click', () => {
+            if (!videoStream) return;
+
+            // 设置 Canvas 大小与 Video 元素保持一致
+            photoCanvas.width = video.videoWidth;
+            photoCanvas.height = video.videoHeight;
+            const context = photoCanvas.getContext('2d');
+            
+            // 将视频帧绘制到 Canvas 上
+            context.drawImage(video, 0, 0, photoCanvas.width, photoCanvas.height);
+            
+            // 导出为 Data URL (JPEG 格式)
+            photoDataURL = photoCanvas.toDataURL('image/jpeg');
+            
+            // 显示预览
+            photoPreview.innerHTML = `<strong>📷 照片预览:</strong><img src="${photoDataURL}" class="preview-img" alt="签到照片">`;
+
+            // 拍照后停止摄像头，节省资源
+            stopCamera();
+            updateCheckinButtonState();
+        });
+
+        // =======================================================
+        // 4. 签到和数据存储 (localStorage)
+        // =======================================================
+
+        const STORAGE_KEY = 'checkinData';
+
+        function loadCheckinData() {
+            const data = localStorage.getItem(STORAGE_KEY);
+            try {
+                return data ? JSON.parse(data) : [];
+            } catch (e) {
+                console.error("Failed to parse checkin data from localStorage:", e);
+                return [];
+            }
+        }
+
+        function saveCheckinData(data) {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+        }
+
+        checkinBtn.addEventListener('click', () => {
+            if (checkinBtn.disabled) return;
+
+            const name = studentNameInput.value.trim();
+            const id = studentIdInput.value.trim();
+
+            if (!name || !id || !currentPosition || !photoDataURL) {
+                alert('请填写姓名学号、获取定位并拍照后再签到！');
+                return;
+            }
+
+            const checkinRecord = {
+                name: name,
+                id: id,
+                timestamp: new Date().toLocaleString('zh-CN'),
+                latitude: currentPosition.latitude,
+                longitude: currentPosition.longitude,
+                accuracy: currentPosition.accuracy,
+                photo: photoDataURL // Base64 编码的图片数据
+            };
+
+            const data = loadCheckinData();
+            data.push(checkinRecord);
+            saveCheckinData(data);
+
+            checkinMessage.textContent = `签到成功！时间: ${checkinRecord.timestamp}`;
+            
+            // 重置状态
+            currentPosition = null;
+            photoDataURL = null;
+            photoPreview.innerHTML = '';
+            studentNameInput.value = '';
+            studentIdInput.value = '';
+            updateCheckinButtonState();
+            getLocation();
+        });
+
+        // =======================================================
+        // 5. 教师端功能：数据显示、导入和导出
+        // =======================================================
+
+        function renderCheckinList(data = loadCheckinData()) {
+            checkinListBody.innerHTML = '';
+            
+            if (data.length === 0) {
+                checkinListBody.innerHTML = '<tr><td colspan="6" style="text-align: center;">暂无签到记录</td></tr>';
+                return;
+            }
+
+            data.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)); // 按时间倒序
+
+            data.forEach(record => {
+                const row = checkinListBody.insertRow();
+                row.insertCell().textContent = record.name;
+                row.insertCell().textContent = record.id;
+                row.insertCell().textContent = record.timestamp;
+                row.insertCell().textContent = `${record.latitude.toFixed(6)}, ${record.longitude.toFixed(6)} (${record.accuracy.toFixed(1)}m)`;
+                
+                // 假设没有反向地理编码服务，位置字段留空或显示通用信息
+                row.insertCell().textContent = '需地图服务解析';
+
+                // 照片预览
+                const imgCell = row.insertCell();
+                const img = document.createElement('img');
+                img.src = record.photo;
+                img.alt = '签到照片';
+                img.className = 'preview-img';
+                imgCell.appendChild(img);
             });
-            setTimeout(() => setStep(2), 1000); // 1秒后进入下一步
         }
-      },
-      (error) => {
-        console.error(error);
-        setStatusMsg("定位失败，请检查手机权限或网络。");
-      },
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
-    );
-  };
 
-  // 步骤 2: 启动摄像头
-  useEffect(() => {
-    let cleanup = () => {};
-    if (step === 2) {
-      const startCamera = async () => {
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({ 
-            video: { facingMode: 'user' }, // 优先使用前置摄像头
-            audio: false 
-          });
-          setCameraStream(stream);
-          if (videoRef.current) {
-            videoRef.current.srcObject = stream;
-          }
-          cleanup = () => stream.getTracks().forEach(track => track.stop());
-        } catch (err) {
-          console.error("Camera Error:", err);
-          setStatusMsg("无法启动摄像头，请允许访问权限。");
-          cleanup = () => {};
-        }
-      };
-      startCamera();
-    }
-    return cleanup;
-  }, [step]);
+        // --- 导出数据 ---
+        exportDataBtn.addEventListener('click', () => {
+            const data = loadCheckinData();
+            if (data.length === 0) {
+                alert('本地暂无签到数据可导出！');
+                return;
+            }
+            const dataStr = JSON.stringify(data, null, 2);
+            const blob = new Blob([dataStr], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `checkin_data_${new Date().toLocaleDateString('zh-CN').replace(/\//g, '-')}.json`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        });
 
-  // 拍照逻辑
-  const takePhoto = () => {
-    if (videoRef.current && canvasRef.current) {
-      const video = videoRef.current;
-      const canvas = canvasRef.current;
-      const context = canvas.getContext('2d');
-      
-      // 设置 canvas 尺寸与视频匹配
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
-      
-      // 添加水印
-      context.font = "bold 30px sans-serif";
-      context.fillStyle = "rgba(255, 255, 255, 0.8)";
-      context.shadowColor = "black";
-      context.shadowBlur = 5;
+        // --- 导入数据 ---
+        importDataFile.addEventListener('change', (event) => {
+            const file = event.target.files[0];
+            if (!file) return;
 
-      const info1 = `姓名: ${name} | 学号: ${sid}`;
-      const info2 = `时间: ${new Date().toLocaleString()}`;
-      
-      context.fillText(info1, 20, canvas.height - 70);
-      context.fillText(info2, 20, canvas.height - 30);
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                try {
+                    const importedData = JSON.parse(e.target.result);
+                    if (!Array.isArray(importedData)) {
+                        throw new Error('导入文件格式不正确，期望一个 JSON 数组。');
+                    }
+                    
+                    // 将导入的数据合并到现有数据中 (可以根据ID和时间戳去重，这里为简化直接合并)
+                    let currentData = loadCheckinData();
+                    // 简单的追加合并
+                    const combinedData = currentData.concat(importedData.filter(
+                        // 简单检查对象结构
+                        item => item.name && item.id && item.timestamp
+                    )); 
+                    
+                    // 去重 (基于 name + id + timestamp)
+                    const uniqueDataMap = new Map();
+                    combinedData.forEach(item => {
+                        const key = `${item.id}-${item.timestamp}`;
+                        if (!uniqueDataMap.has(key)) {
+                            uniqueDataMap.set(key, item);
+                        }
+                    });
 
-      const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
-      setPhoto(dataUrl);
-      
-      // 停止摄像头
-      if (cameraStream) cameraStream.getTracks().forEach(track => track.stop());
-      setStep(3);
-    }
-  };
+                    saveCheckinData(Array.from(uniqueDataMap.values()));
 
-  // 步骤 3: 提交数据
-  const handleSubmit = async () => {
-    if (!location || !photo || !db) return;
+                    alert(`数据导入成功！共导入/合并 ${Array.from(uniqueDataMap.values()).length} 条记录。`);
+                    renderCheckinList();
+                } catch (error) {
+                    alert(`导入失败: ${error.message}`);
+                    console.error('Import error:', error);
+                }
+            };
+            reader.readAsText(file);
+        });
 
-    try {
-      setStatusMsg('正在提交数据...');
-      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'checkins'), {
-        studentName: name,
-        studentId: sid,
-        location: location,
-        photoBase64: photo, 
-        timestamp: serverTimestamp(),
-        status: location.inZone ? '正常签到' : '位置异常'
-      });
-      onSuccess();
-    } catch (e) {
-      console.error("提交失败:", e);
-      setStatusMsg("提交失败，请检查网络或联系管理员。");
-      alert("数据上传失败: " + e.message);
-    }
-  };
+        // --- 清空数据 ---
+        clearDataBtn.addEventListener('click', () => {
+            if (confirm('⚠️ 警告：您确定要清空所有本地签到数据吗？此操作不可撤销！')) {
+                localStorage.removeItem(STORAGE_KEY);
+                alert('本地签到数据已清空。');
+                renderCheckinList();
+            }
+        });
 
-  const retake = () => {
-    setPhoto(null);
-    setStep(2);
-    setStatusMsg('请重新拍摄人脸照片。');
-  };
+        // =======================================================
+        // 6. 初始化
+        // =======================================================
 
-  return (
-    <div className="flex flex-col min-h-[70vh] animate-in fade-in duration-500">
-        {/* 步骤指示器 */}
-        <div className="flex justify-between mb-6 px-2">
-            {[1, 2, 3].map(i => (
-                <div key={i} className={`h-2 flex-1 mx-1 rounded-full ${step >= i ? 'bg-blue-600' : 'bg-gray-200'}`} />
-            ))}
-        </div>
-        
-        {/* 状态信息 */}
-        <p className={`text-center mb-6 text-sm font-medium ${step < 3 ? 'text-blue-600' : 'text-green-600'}`}>{statusMsg}</p>
+        setView('student'); // 默认显示学生端
 
-
-        {/* 步骤 1: 定位 */}
-        {step === 1 && (
-            <div className="flex-1 flex flex-col items-center justify-center space-y-6 text-center">
-                <div className="w-24 h-24 bg-blue-50 rounded-full flex items-center justify-center animate-pulse">
-                    <MapPin size={48} className="text-blue-500" />
-                </div>
-                <p className="text-gray-500 text-sm px-8">请点击按钮获取您的 GPS 位置，系统将进行区域校验。</p>
-                <button onClick={handleGetLocation} className="w-full bg-blue-600 text-white py-3 rounded-xl font-semibold shadow-lg active:scale-98 transition-transform">
-                    {location ? `重新定位 (${Math.round(location.distance)}m)` : '获取当前位置'}
-                </button>
-            </div>
-        )}
-
-        {/* 步骤 2: 拍照 */}
-        {step === 2 && !photo && (
-            <div className="flex-1 flex flex-col relative bg-black rounded-xl overflow-hidden shadow-xl aspect-[4/3]">
-                <video ref={videoRef} autoPlay playsInline className="absolute inset-0 w-full h-full object-cover" />
-                <canvas ref={canvasRef} className="hidden" />
-                
-                {/* 拍照按钮和信息覆盖层 */}
-                <div className="absolute top-0 w-full h-full flex flex-col justify-end items-center p-6 bg-gradient-to-t from-black/60 to-transparent">
-                    <div className='text-white/80 text-sm mb-4 bg-black/50 p-2 rounded-lg'>
-                        请确保面部清晰可见
-                    </div>
-                    <button onClick={takePhoto} className="w-16 h-16 rounded-full bg-white border-4 border-gray-300 shadow-xl flex items-center justify-center active:scale-90 transition-all">
-                        <Camera size={24} className="text-gray-700" />
-                    </button>
-                </div>
-            </div>
-        )}
-
-        {/* 步骤 3: 确认 */}
-        {step === 3 && photo && (
-            <div className="flex-1 flex flex-col space-y-4">
-                <div className="relative rounded-xl overflow-hidden shadow-md aspect-[4/3] bg-gray-100">
-                    <img src={photo} alt="Captured Check-in" className="w-full h-full object-cover" />
-                </div>
-
-                <div className="space-y-3">
-                    <button onClick={handleSubmit} className="w-full bg-green-600 hover:bg-green-700 text-white py-3 rounded-xl font-bold shadow-lg active:scale-98 transition-transform flex items-center justify-center gap-2">
-                        <CheckCircle size={20} /> 确认并提交记录
-                    </button>
-                    <button onClick={retake} className="w-full bg-white border border-gray-300 text-gray-700 py-3 rounded-xl font-semibold shadow-sm active:scale-98 transition-transform flex items-center justify-center gap-2">
-                        <Camera size={18} /> 重新拍摄
-                    </button>
-                </div>
-            </div>
-        )}
-    </div>
-  );
-}
-
-// --- 签到成功组件 ---
-function SuccessScreen({ onBack }) {
-    return (
-        <div className="flex flex-col items-center justify-center h-[70vh] text-center space-y-6 animate-in fade-in duration-500">
-            <div className="w-24 h-24 bg-green-100 rounded-full flex items-center justify-center text-green-600 animate-bounce">
-                <CheckCircle size={60} />
-            </div>
-            <div>
-                <h2 className="text-2xl font-bold text-gray-800">签到成功!</h2>
-                <p className="text-gray-500 mt-2">您的查寝数据已成功上传至平台。</p>
-            </div>
-            <button onClick={onBack} className="mt-8 text-blue-600 font-medium hover:underline">
-                返回首页
-            </button>
-        </div>
-    )
-}
-
-// --- 教师/宿管管理面板组件 ---
-function AdminDashboard({ db, appId }) {
-  const [checkins, setCheckins] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    // 使用 onSnapshot 监听公共集合数据，确保实时性
-    const q = query(
-        collection(db, 'artifacts', appId, 'public', 'data', 'checkins'),
-        orderBy('timestamp', 'desc')
-    );
-
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const data = snapshot.docs.map(doc => {
-          const docData = doc.data();
-          return {
-              id: doc.id,
-              ...docData,
-              // 格式化时间戳
-              timestamp: docData.timestamp ? new Date(docData.timestamp.seconds * 1000).toLocaleString('zh-CN', { hour12: false }) : 'N/A'
-          };
-      });
-      setCheckins(data);
-      setLoading(false);
-    }, (error) => {
-        console.error("获取查寝记录失败:", error);
-        setLoading(false);
-    });
-
-    return () => unsubscribe();
-  }, [db, appId]); // 依赖 db 和 appId
-
-  return (
-    <div className="animate-in fade-in duration-500">
-      <div className="flex items-center justify-between mb-4 mt-2">
-        <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
-            <List size={20} className='text-blue-600' /> 实时查寝记录
-        </h2>
-        <span className="bg-blue-100 text-blue-800 text-xs px-3 py-1 rounded-full font-medium">
-            共 {checkins.length} 条记录
-        </span>
-      </div>
-
-      {loading ? (
-        <div className="space-y-3">
-            {[1,2,3].map(i => <div key={i} className="h-20 bg-gray-200 rounded-xl animate-pulse" />)}
-        </div>
-      ) : checkins.length === 0 ? (
-        <div className="text-center py-10 text-gray-400 border border-dashed rounded-xl p-6">
-            <List size={30} className='mx-auto mb-2' />
-            暂无新的签到数据
-        </div>
-      ) : (
-        <div className="space-y-4">
-          {checkins.map(item => (
-            <div key={item.id} className="bg-white rounded-xl shadow-lg border border-gray-100 p-4 flex gap-4 items-start transition-all hover:shadow-xl">
-              {/* 缩略图 */}
-              <div className="w-16 h-16 rounded-lg bg-gray-200 flex-shrink-0 overflow-hidden">
-                {item.photoBase64 ? (
-                    <img src={item.photoBase64} className="w-full h-full object-cover" alt="Check-in Face" />
-                ) : (
-                    <User className="w-full h-full p-4 text-gray-400" />
-                )}
-              </div>
-              
-              {/* 信息 */}
-              <div className="flex-1 min-w-0">
-                <div className="flex justify-between items-start mb-1">
-                    <div>
-                        <h3 className="font-bold text-gray-900 truncate">{item.studentName}</h3>
-                        <p className="text-xs text-gray-500">学号: {item.studentId}</p>
-                    </div>
-                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${item.status === '正常签到' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
-                        {item.status}
-                    </span>
-                </div>
-                
-                <div className="mt-2 text-xs text-gray-500 flex flex-col gap-0.5 border-t pt-2 border-gray-100">
-                    <div className="flex items-center gap-1">
-                        <CheckCircle size={10} /> 
-                        签到时间: {item.timestamp}
-                    </div>
-                    <div className="flex items-center gap-1">
-                        {item.location?.inZone ? <MapPin size={10} className='text-green-500' /> : <AlertTriangle size={10} className='text-red-500' />}
-                        定位: {item.location?.distance}m 误差
-                    </div>
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
+    </script>
+</body>
+</html>
