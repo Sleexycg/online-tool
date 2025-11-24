@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>公章透明化工具 (Seal Extractor)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* 强制使用 Inter 字体 */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f9fb;
+        }
+        /* Canvas 样式，用于显示透明背景效果 */
+        .checkerboard {
+            background-image: linear-gradient(45deg, #ccc 25%, transparent 25%), 
+                              linear-gradient(-45deg, #ccc 25%, transparent 25%),
+                              linear-gradient(45deg, transparent 75%, #ccc 75%),
+                              linear-gradient(-45deg, transparent 75%, #ccc 75%);
+            background-size: 20px 20px;
+            background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+        }
+    </style>
+</head>
+<body class="p-4 md:p-8 flex items-center justify-center min-h-screen">
+
+    <div class="w-full max-w-2xl bg-white rounded-xl shadow-2xl p-6 md:p-8 space-y-6">
+        
+        <!-- Tool Header -->
+        <h1 class="text-3xl font-bold text-gray-800 flex items-center gap-3">
+            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-red-500"><circle cx="12" cy="12" r="10"/><path d="M12 2a4 4 0 0 0-4 4v3h8V6a4 4 0 0 0-4-4zM8 9v8a4 4 0 1 0 8 0V9z"/></svg>
+            公章提取工具
+        </h1>
+        <p class="text-gray-500">上传图片并点击印章区域，即可智能移除背景，生成透明 PNG。</p>
+
+        <!-- Step 1: File Upload -->
+        <div class="space-y-3">
+            <label class="block text-sm font-medium text-gray-700">步骤 1: 上传文件</label>
+            <input type="file" id="imageUpload" accept="image/*" class="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" />
+        </div>
+
+        <!-- Step 2: Interactive Canvas -->
+        <div id="canvasContainer" class="hidden space-y-3">
+            <label class="block text-sm font-medium text-gray-700">步骤 2: 点击印章颜色进行采样</label>
+            <div class="checkerboard rounded-lg overflow-hidden border-2 border-gray-300 shadow-inner">
+                <canvas id="originalCanvas" class="w-full cursor-pointer"></canvas>
+            </div>
+            <p id="clickInfo" class="text-sm text-blue-600 font-medium"></p>
+        </div>
+
+        <!-- Step 3: Result and Download -->
+        <div id="resultContainer" class="hidden space-y-3">
+            <label class="block text-sm font-medium text-gray-700">步骤 3: 提取结果 (透明背景)</label>
+            <div class="checkerboard rounded-lg p-2 border-2 border-gray-300 flex justify-center items-center">
+                <canvas id="resultCanvas" class="max-w-full h-auto"></canvas>
+            </div>
+            
+            <button id="downloadButton" disabled class="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-3 rounded-lg transition duration-150 disabled:bg-green-300 shadow-md flex items-center justify-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+                下载透明公章 (PNG)
+            </button>
+        </div>
+    </div>
+
+    <script>
+        const imageUpload = document.getElementById('imageUpload');
+        const originalCanvas = document.getElementById('originalCanvas');
+        const resultCanvas = document.getElementById('resultCanvas');
+        const canvasContainer = document.getElementById('canvasContainer');
+        const resultContainer = document.getElementById('resultContainer');
+        const downloadButton = document.getElementById('downloadButton');
+        const clickInfo = document.getElementById('clickInfo');
+        
+        let originalImage = null;
+        let targetColor = null; // Stores {r, g, b} of the sampled seal color
+
+        /**
+         * Loads the uploaded image onto the original canvas.
+         */
+        imageUpload.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                const img = new Image();
+                img.onload = () => {
+                    originalImage = img;
+                    
+                    // Reset state
+                    targetColor = null;
+                    downloadButton.disabled = true;
+                    clickInfo.textContent = '请在图片上点击印章（红色或蓝色）区域进行采样...';
+
+                    // Set canvas dimensions
+                    originalCanvas.width = img.width;
+         
