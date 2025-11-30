@@ -3,19 +3,31 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AR 手势射击游戏 beta1.0</title>
+    <title>AR 手势射击游戏 V1.1</title>
     <style>
-        /* (样式部分不变，保持原样) */
         body { margin: 0; overflow: hidden; background-color: #000; }
         #game-container { position: relative; width: 100vw; height: 100vh; }
         canvas { display: block; }
         
+        /* Loading 遮罩样式 - 新增进度条 */
         #loading-overlay {
             position: fixed; top: 0; left: 0; width: 100%; height: 100%;
             background: rgba(0, 0, 0, 0.95); color: #fff; z-index: 100;
             display: flex; justify-content: center; align-items: center;
             flex-direction: column; font-family: sans-serif;
+            text-align: center;
         }
+        #progress-bar-container {
+            width: 80%; max-width: 400px; height: 20px; background: #333;
+            border-radius: 10px; margin: 15px 0; overflow: hidden;
+        }
+        #progress-bar {
+            height: 100%; width: 0; background: linear-gradient(90deg, #3498db, #2ecc71);
+            transition: width 0.1s;
+        }
+        #status-text { margin-top: 5px; font-size: 0.9em; color: #ccc; }
+        
+        /* 旧的加载器动画 (保留) */
         .loader {
             border: 4px solid #f3f3f3; border-top: 4px solid #3498db;
             border-radius: 50%; width: 40px; height: 40px; animation: spin 2s linear infinite;
@@ -23,6 +35,7 @@
         }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
 
+        /* 浮动文字特效 (保留) */
         .hit-effect {
             position: absolute; color: #ff0; font-weight: bold; font-size: 24px;
             pointer-events: none; opacity: 1; transform: translate(-50%, -50%);
@@ -37,8 +50,11 @@
 <body>
     <div id="loading-overlay">
         <h1>🔫 正在加载 AR 射击资源...</h1>
-        <p>请确保摄像头可用，正在下载 Three.js 和 MediaPipe 模型。</p>
-        <div class="loader"></div>
+        <p>正在从国内镜像源加载模型文件...</p>
+        <div id="progress-bar-container">
+            <div id="progress-bar"></div>
+        </div>
+        <div id="status-text">初始化中...</div>
     </div>
 
     <div id="game-container">
@@ -51,22 +67,28 @@
         // **Three.js 优化: 改用 Cloudflare CDN (通常更快)**
         import * as THREE from 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r158/three.module.min.js';
         
-        // **MediaPipe 优化: 保持版本锁定，但改用 jsdelivr 官方发布链接**
-        // 注意：这是 Three.js 资源，不是 hands.js 的模型文件，模型文件路径在下方 `locateFile` 中设置。
+        // **MediaPipe 优化: 保持版本锁定，改用 jsdelivr 官方发布链接**
         import { Hands } from 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js';
         
-        // --- 2. 常量与游戏配置 (保持不变) ---
+        // --- 2. 常量与游戏配置 ---
         
         const MAX_ENEMIES = 4;
-        const ENEMY_RADIUS = 0.5;
         const AIM_ASSIST_DISTANCE = 3; 
         const BULLET_COOLDOWN_MS = 300; 
-        const ENEMY_SPEED = 0.005;
-        const FRAME_RATE = 60;
         
-        // --- 3. 游戏状态与核心对象 (保持不变) ---
+        // **媒体文件基准路径 - 使用国内镜像**
+        const MEDIAPIPE_BASE_URL = `https://registry.npmmirror.com/@mediapipe/hands/0.4.1646424915/files/`;
+        // 需要加载的模型文件列表及其大小 (用于计算总进度)
+        // 估算文件大小，不精确但能提供进度感
+        const MODEL_FILES = [
+            { name: 'hands_solution_simd_wasm.wasm', size: 10 * 1024 * 1024 }, // 约 10MB
+            { name: 'hands_solution_simd_opt.data', size: 1 * 1024 * 1024 }, // 约 1MB
+        ];
+        const TOTAL_MODEL_SIZE = MODEL_FILES.reduce((sum, file) => sum + file.size, 0);
 
-        let videoElement, loadingOverlay;
+        // --- 3. 游戏状态与核心对象 (略) ---
+
+        let videoElement, loadingOverlay, progressBar, statusText;
         let scene, camera, renderer, clock;
         let hands, lastDetectionTime = 0;
         let enemies = [];
@@ -74,7 +96,8 @@
         let isShooting = false;
         let isReadyToShoot = true; 
         let isGameStarted = false;
-
+        
+        // ... (省略所有 THREE.js Mesh 和 AudioContext 定义，它们保持不变) ...
         const crosshairGeometry = new THREE.SphereGeometry(0.05);
         const crosshairMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 });
         const crosshair = new THREE.Mesh(crosshairGeometry, crosshairMaterial);
@@ -83,7 +106,7 @@
         const laserMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 });
         const laserLine = new THREE.Line(laserGeometry, laserMaterial);
 
-        const enemyGeometry = new THREE.TorusGeometry(ENEMY_RADIUS, 0.1, 16, 100);
+        const enemyGeometry = new THREE.TorusGeometry(0.5, 0.1, 16, 100);
         const enemyMaterial = new THREE.MeshBasicMaterial({ color: 0x00ffff, wireframe: true });
 
         const audioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -91,78 +114,173 @@
         function playSound(freq, duration, type) {
             const oscillator = audioContext.createOscillator();
             const gainNode = audioContext.createGain();
-            
             oscillator.connect(gainNode);
             gainNode.connect(audioContext.destination);
-            
             oscillator.type = type;
             oscillator.frequency.setValueAtTime(freq, audioContext.currentTime);
             gainNode.gain.setValueAtTime(1, audioContext.currentTime);
             gainNode.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + duration);
-            
             oscillator.start();
             oscillator.stop(audioContext.currentTime + duration);
         }
+        
+        // ... (省略 initThree, spawnEnemy, updateEnemies, handleShooting, showFloatText 等函数，它们保持不变) ...
+        // 为了简洁，这里只保留 MediaPipe 相关的核心改动。
 
-        // --- 4. Three.js 初始化 (保持不变) ---
+        // --- 核心：带进度条的模型下载函数 ---
+        
+        let bytesDownloaded = 0;
+        
+        function updateProgress(bytes) {
+            bytesDownloaded += bytes;
+            const percentage = Math.min(100, (bytesDownloaded / TOTAL_MODEL_SIZE) * 100);
+            progressBar.style.width = `${percentage}%`;
+        }
 
+        /**
+         * 使用 Fetch API 手动下载文件并显示进度
+         * @param {string} url - 文件 URL
+         * @returns {Promise<Response>} 
+         */
+        async function fetchWithProgress(url) {
+            statusText.textContent = `正在下载: ${url.split('/').pop()}...`;
+            
+            const response = await fetch(url);
+
+            if (!response.ok) {
+                throw new Error(`下载失败，状态码: ${response.status}`);
+            }
+
+            // MediaPipe 期望返回一个带有 ArrayBuffer 的 Response 对象
+            const contentType = response.headers.get('content-type');
+            
+            // 如果文件是文本类型，直接返回 text()
+            if (contentType && contentType.includes('text/javascript')) {
+                 return response;
+            }
+
+            // 对于二进制文件 (WASM/DATA)，使用 ReadableStream 读取进度
+            const reader = response.body.getReader();
+            const chunks = [];
+            
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                    break;
+                }
+                chunks.push(value);
+                updateProgress(value.length);
+            }
+
+            const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+            const buffer = new Uint8Array(totalLength);
+            let offset = 0;
+            for (const chunk of chunks) {
+                buffer.set(chunk, offset);
+                offset += chunk.length;
+            }
+
+            // 创建一个新的 Response 对象，模拟 MediaPipe 所需的格式
+            return new Response(buffer.buffer, {
+                status: response.status,
+                statusText: response.statusText,
+                headers: response.headers,
+            });
+        }
+
+
+        // --- 7. MediaPipe 初始化 (替换加载逻辑) ---
+        
+        function initMediaPipe() {
+            progressBar = document.getElementById('progress-bar');
+            statusText = document.getElementById('status-text');
+
+            hands = new Hands({
+                // 1. hands.js 脚本本身使用 jsdelivr (已在 import 处定义)
+
+                // 2. 内部模型文件使用国内镜像 + 进度条加载
+                locateFile: (file) => {
+                    return `${MEDIAPIPE_BASE_URL}${file}`;
+                },
+                // 强制 MediaPipe 使用我们的自定义 fetch 函数
+                moduleConfig: {
+                    fetchResource: fetchWithProgress 
+                }
+            });
+            
+            // 当所有模型加载和初始化完毕后触发的事件
+            hands.initialize().then(() => {
+                statusText.textContent = "模型加载完成，正在启动摄像头...";
+                
+                // 尝试打开摄像头
+                if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                    navigator.mediaDevices.getUserMedia({ video: true })
+                        .then(stream => {
+                            videoElement.srcObject = stream;
+                            videoElement.onloadedmetadata = () => {
+                                videoElement.play();
+                                isGameStarted = true;
+                                loadingOverlay.style.display = 'none';
+                                clock.start();
+                                render();
+                            };
+                        })
+                        .catch(err => {
+                            console.error("无法获取摄像头: ", err);
+                            loadingOverlay.innerHTML = '<h1>❌ 无法启动摄像头</h1><p>请检查权限或设备连接。</p>';
+                        });
+                } else {
+                    loadingOverlay.innerHTML = '<h1>❌ 浏览器不支持摄像头</h1><p>请使用支持 MediaDevices API 的现代浏览器。</p>';
+                }
+            }).catch(e => {
+                console.error("MediaPipe 初始化失败:", e);
+                loadingOverlay.innerHTML = `<h1>❌ 模型加载失败</h1><p>请检查网络或镜像源是否有效。错误: ${e.message}</p>`;
+            });
+
+
+            hands.setOptions({
+                maxNumHands: 1,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+
+            hands.onResults(onResults);
+        }
+        
+        // ... (onResults, detectHands, render 等函数保持不变) ...
+
+
+        // 完整的函数定义 (为了简洁，这里将未改动的函数放在末尾，请您确保替换时覆盖所有内容)
+        
         function initThree() {
             scene = new THREE.Scene();
             scene.background = new THREE.Color(0x000000); 
-            
             camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
             camera.position.z = 5;
-
             renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.setPixelRatio(window.devicePixelRatio);
             document.getElementById('game-container').appendChild(renderer.domElement);
-
             scene.add(crosshair);
             scene.add(laserLine);
-
             window.addEventListener('resize', () => {
                 camera.aspect = window.innerWidth / window.innerHeight;
                 camera.updateProjectionMatrix();
                 renderer.setSize(window.innerWidth, window.innerHeight);
             });
         }
-
-        // --- 5. 敌人生成与移动 (保持不变) ---
-
+        
         function spawnEnemy() {
             if (enemies.length >= MAX_ENEMIES) return;
-
             const enemyMesh = new THREE.Mesh(enemyGeometry, enemyMaterial.clone());
-            
             const boundary = 10;
-            const pos = new THREE.Vector3(
-                THREE.MathUtils.randFloatSpread(boundary * 2), 
-                THREE.MathUtils.randFloatSpread(boundary * 2), 
-                -10
-            );
-
-            if (Math.random() < 0.5) { 
-                pos.x = (Math.random() < 0.5 ? -1 : 1) * (boundary + 5);
-            } else { 
-                pos.y = (Math.random() < 0.5 ? -1 : 1) * (boundary + 5);
-            }
-            
+            const pos = new THREE.Vector3(THREE.MathUtils.randFloatSpread(boundary * 2), THREE.MathUtils.randFloatSpread(boundary * 2), -10);
+            if (Math.random() < 0.5) { pos.x = (Math.random() < 0.5 ? -1 : 1) * (boundary + 5); } else { pos.y = (Math.random() < 0.5 ? -1 : 1) * (boundary + 5); }
             enemyMesh.position.copy(pos);
-
-            const target = new THREE.Vector3(
-                THREE.MathUtils.randFloatSpread(3), 
-                THREE.MathUtils.randFloatSpread(3), 
-                -5
-            );
-            
+            const target = new THREE.Vector3(THREE.MathUtils.randFloatSpread(3), THREE.MathUtils.randFloatSpread(3), -5);
             const direction = target.clone().sub(enemyMesh.position).normalize();
-
-            enemyMesh.userData = {
-                direction: direction,
-                isDead: false,
-            };
-
+            enemyMesh.userData = { direction: direction, isDead: false, };
             enemies.push(enemyMesh);
             scene.add(enemyMesh);
         }
@@ -171,12 +289,9 @@
             for (let i = enemies.length - 1; i >= 0; i--) {
                 const enemy = enemies[i];
                 if (enemy.userData.isDead) continue;
-
-                enemy.position.addScaledVector(enemy.userData.direction, ENEMY_SPEED * delta * 60);
-
+                enemy.position.addScaledVector(enemy.userData.direction, 0.005 * delta * 60);
                 enemy.rotation.x += 0.05;
                 enemy.rotation.y += 0.05;
-
                 if (enemy.position.z > camera.position.z - 2) {
                     enemy.userData.isDead = true;
                     showFloatText("MISS", new THREE.Vector3(enemy.position.x, enemy.position.y + 0.5, enemy.position.z), "#ff4500");
@@ -185,52 +300,38 @@
                     playSound(100, 0.3, 'sawtooth'); 
                 }
             }
-
             while (enemies.length < MAX_ENEMIES) {
                 spawnEnemy();
             }
         }
         
-        // --- 6. 核心游戏逻辑：瞄准与射击 (保持不变) ---
-
         function handleShooting(currentTime) {
             if (!isShooting || currentTime - lastShotTime < BULLET_COOLDOWN_MS) return;
-
             lastShotTime = currentTime;
-            
             playSound(440, 0.1, 'square'); 
-
             let hitEnemy = null;
             let minDistance = Infinity;
-
             for (const enemy of enemies) {
                 if (enemy.userData.isDead) continue;
-                
                 const enemyScreenPos = enemy.position.clone().project(camera);
                 const enemyX = (enemyScreenPos.x * 0.5 + 0.5) * window.innerWidth;
                 const enemyY = (-enemyScreenPos.y * 0.5 + 0.5) * window.innerHeight;
-
                 const crosshairScreenPos = crosshair.position.clone().project(camera);
                 const crosshairX = (crosshairScreenPos.x * 0.5 + 0.5) * window.innerWidth;
                 const crosshairY = (-crosshairScreenPos.y * 0.5 + 0.5) * window.innerHeight;
-
                 const dist = Math.sqrt(Math.pow(enemyX - crosshairX, 2) + Math.pow(enemyY - crosshairY, 2));
-
                 if (dist < AIM_ASSIST_DISTANCE && dist < minDistance) {
                     minDistance = dist;
                     hitEnemy = enemy;
                 }
             }
-
             if (hitEnemy) {
                 hitEnemy.userData.isDead = true;
                 scene.remove(hitEnemy);
                 const index = enemies.indexOf(hitEnemy);
                 if (index > -1) enemies.splice(index, 1);
-
                 showFloatText("HIT!", new THREE.Vector3(hitEnemy.position.x, hitEnemy.position.y + 0.5, hitEnemy.position.z), "#00ff00");
                 playSound(880, 0.1, 'sine'); 
-
                 spawnEnemy();
             } else {
                 showFloatText("MISS", crosshair.position.clone(), "#ff4500");
@@ -244,95 +345,38 @@
             div.textContent = text;
             div.style.color = color;
             document.getElementById('game-container').appendChild(div);
-
             const screenPos = worldPos.project(camera);
             div.style.left = (screenPos.x * 0.5 + 0.5) * window.innerWidth + 'px';
             div.style.top = (-screenPos.y * 0.5 + 0.5) * window.innerHeight + 'px';
-
             div.addEventListener('animationend', () => div.remove());
-        }
-
-        // --- 7. MediaPipe 手势识别逻辑 ---
-        
-        function initMediaPipe() {
-            // **MediaPipe 模型文件优化: 将 unpkg 替换为 jsdelivr**
-            // MediaPipe 模型的 .js, .wasm, .data 文件会通过这个函数加载
-            const BASE_URL = `https://registry.npmmirror.com/@mediapipe/hands/0.4.1646424915/files/`;
-
-            hands = new Hands({
-                locateFile: (file) => {
-                    return `${BASE_URL}${file}`;
-                }
-            });
-
-            hands.setOptions({
-                maxNumHands: 1,
-                modelComplexity: 1,
-                minDetectionConfidence: 0.5,
-                minTrackingConfidence: 0.5
-            });
-
-            hands.onResults(onResults);
-            
-            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-                navigator.mediaDevices.getUserMedia({ video: true })
-                    .then(stream => {
-                        videoElement.srcObject = stream;
-                        videoElement.onloadedmetadata = () => {
-                            videoElement.play();
-                            isGameStarted = true;
-                            loadingOverlay.style.display = 'none';
-                            clock.start();
-                            render();
-                        };
-                    })
-                    .catch(err => {
-                        console.error("无法获取摄像头: ", err);
-                        loadingOverlay.innerHTML = '<h1>❌ 无法启动摄像头</h1><p>请检查权限或设备连接。</p>';
-                    });
-            } else {
-                loadingOverlay.innerHTML = '<h1>❌ 浏览器不支持摄像头</h1><p>请使用支持 MediaDevices API 的现代浏览器。</p>';
-            }
         }
 
         function onResults(results) {
             const currentTime = performance.now();
-            if (currentTime - lastDetectionTime < 1000 / 30) { 
-                return;
-            }
+            if (currentTime - lastDetectionTime < 1000 / 30) { return; }
             lastDetectionTime = currentTime;
-
             try {
                 if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
                     const landmarks = results.multiHandLandmarks[0];
-                    
                     const indexTip = landmarks[8]; 
                     const thumbTip = landmarks[4];  
                     const indexMCP = landmarks[5]; 
-                    
                     const viewX = (1 - indexTip.x) * 2 - 1; 
                     const viewY = -(indexTip.y * 2 - 1); 
-                    
                     const vector = new THREE.Vector3(viewX, viewY, 0.5); 
                     vector.unproject(camera);
-                    
                     const direction = vector.sub(camera.position).normalize();
                     const distance = 3; 
                     crosshair.position.copy(camera.position).addScaledVector(direction, distance);
-                    
                     const laserPoints = [camera.position, crosshair.position];
                     laserLine.geometry.setFromPoints(laserPoints);
-                    
                     const isIndexStraight = indexTip.y < indexMCP.y;
-                    
                     const thumbIndexDistance = Math.sqrt(
                         Math.pow(thumbTip.x - indexMCP.x, 2) + 
                         Math.pow(thumbTip.y - indexMCP.y, 2)
                     );
-                    
                     const TRIGGER_THRESHOLD = 0.1; 
                     const isTriggerPulled = thumbIndexDistance < TRIGGER_THRESHOLD;
-                    
                     if (isIndexStraight) {
                         if (isTriggerPulled && isReadyToShoot) {
                             isShooting = true;
@@ -350,7 +394,6 @@
                         isReadyToShoot = true;
                         crosshair.material.color.set(0xffa500); 
                     }
-                    
                 } else {
                     isShooting = false;
                     crosshair.material.color.set(0x0000ff); 
@@ -359,9 +402,7 @@
                 console.error("MediaPipe 处理错误: ", e);
             }
         }
-
-        // --- 8. 游戏主循环 (保持不变) ---
-
+        
         async function detectHands() {
             if (!isGameStarted || videoElement.readyState < 2) {
                 setTimeout(detectHands, 100);
@@ -373,28 +414,22 @@
 
         function render() {
             requestAnimationFrame(render);
-            
             if (!isGameStarted) return;
-
             const delta = clock.getDelta();
             const currentTime = clock.elapsedTime * 1000; 
-
             updateEnemies(delta);
             handleShooting(currentTime);
-
             renderer.render(scene, camera);
         }
-
-        // --- 9. 主函数 (保持不变) ---
 
         function main() {
             videoElement = document.getElementById('webcam');
             loadingOverlay = document.getElementById('loading-overlay');
+            progressBar = document.getElementById('progress-bar');
+            statusText = document.getElementById('status-text');
             clock = new THREE.Clock(false); 
-
             initThree();
             initMediaPipe();
-            
             detectHands();
         }
 
