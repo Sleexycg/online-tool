@@ -1,0 +1,87 @@
+/* style.css */
+
+body { 
+    margin: 0; 
+    overflow: hidden; 
+    background-color: #000; 
+    font-family: sans-serif;
+}
+
+#game-container { 
+    position: relative; 
+    width: 100vw; 
+    height: 100vh; 
+}
+
+/* 摄像头视频流：全屏但透明度设为 0，因为 Three.js 会在它上面渲染 */
+#webcam {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover; /* 确保视频铺满屏幕 */
+    opacity: 0;      /* 视频流仅用作 MediaPipe 的输入，不直接显示 */
+    transform: scaleX(-1); /* 镜像翻转，使手势更自然 */
+}
+
+/* Three.js canvas 将完全覆盖它 */
+canvas { 
+    display: block; 
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 10;
+}
+ 
+/* -------------------- Loading 遮罩 -------------------- */
+
+#loading-overlay {
+    position: fixed; 
+    top: 0; 
+    left: 0; 
+    width: 100%; 
+    height: 100%;
+    background: rgba(0, 0, 0, 0.95); 
+    color: #fff; 
+    z-index: 100;
+    display: flex; 
+    justify-content: center; 
+    align-items: center;
+    flex-direction: column; 
+    text-align: center;
+}
+
+.loader {
+    border: 4px solid #f3f3f3; 
+    border-top: 4px solid #3498db;
+    border-radius: 50%; 
+    width: 40px; 
+    height: 40px; 
+    animation: spin 2s linear infinite;
+    margin-top: 15px;
+}
+
+@keyframes spin { 
+    0% { transform: rotate(0deg); } 
+    100% { transform: rotate(360deg); } 
+}
+
+/* -------------------- 命中效果 -------------------- */
+
+.hit-effect {
+    position: absolute; 
+    color: #ff0; 
+    font-weight: bold; 
+    font-size: 24px;
+    pointer-events: none; 
+    opacity: 1; 
+    transform: translate(-50%, -50%);
+    animation: float-up 0.8s ease-out forwards; 
+    z-index: 50;
+}
+
+@keyframes float-up {
+    0% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+    100% { transform: translate(-50%, -100px) scale(0.5); opacity: 0; }
+}
