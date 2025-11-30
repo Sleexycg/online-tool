@@ -3,13 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AR 手势射击游戏 V1.1</title>
+    <title>AR 手势射击游戏</title>
     <style>
         body { margin: 0; overflow: hidden; background-color: #000; }
         #game-container { position: relative; width: 100vw; height: 100vh; }
         canvas { display: block; }
         
-        /* Loading 遮罩样式 - 新增进度条 */
+        /* Loading 遮罩样式 */
         #loading-overlay {
             position: fixed; top: 0; left: 0; width: 100%; height: 100%;
             background: rgba(0, 0, 0, 0.95); color: #fff; z-index: 100;
@@ -25,7 +25,13 @@
             height: 100%; width: 0; background: linear-gradient(90deg, #3498db, #2ecc71);
             transition: width 0.1s;
         }
-        #status-text { margin-top: 5px; font-size: 0.9em; color: #ccc; }
+        /* 进度文字容器 */
+        #progress-text-container {
+            width: 80%; max-width: 400px;
+            display: flex; justify-content: space-between;
+            font-size: 0.9em; color: #ccc; margin-top: 5px;
+        }
+        #status-text { margin-top: 10px; font-size: 1.1em; color: #fff; }
         
         /* 旧的加载器动画 (保留) */
         .loader {
@@ -51,9 +57,16 @@
     <div id="loading-overlay">
         <h1>🔫 正在加载 AR 射击资源...</h1>
         <p>正在从国内镜像源加载模型文件...</p>
+        
         <div id="progress-bar-container">
             <div id="progress-bar"></div>
         </div>
+        
+        <div id="progress-text-container">
+            <span id="downloaded-size">0.00 MB / 0.00 MB</span>
+            <span id="remaining-size">剩余: 0.00 MB</span>
+        </div>
+        
         <div id="status-text">初始化中...</div>
     </div>
 
@@ -64,10 +77,7 @@
     <script type="module">
         // --- 1. 导入 Three.js 和 MediaPipe ---
         
-        // **Three.js 优化: 改用 Cloudflare CDN (通常更快)**
         import * as THREE from 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r158/three.module.min.js';
-        
-        // **MediaPipe 优化: 保持版本锁定，改用 jsdelivr 官方发布链接**
         import { Hands } from 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js';
         
         // --- 2. 常量与游戏配置 ---
@@ -76,19 +86,23 @@
         const AIM_ASSIST_DISTANCE = 3; 
         const BULLET_COOLDOWN_MS = 300; 
         
-        // **媒体文件基准路径 - 使用国内镜像**
+        // 媒体文件基准路径 - 使用国内镜像
         const MEDIAPIPE_BASE_URL = `https://registry.npmmirror.com/@mediapipe/hands/0.4.1646424915/files/`;
-        // 需要加载的模型文件列表及其大小 (用于计算总进度)
+        
+        // 模型文件列表及其大小 (用于计算总进度)
         // 估算文件大小，不精确但能提供进度感
         const MODEL_FILES = [
             { name: 'hands_solution_simd_wasm.wasm', size: 10 * 1024 * 1024 }, // 约 10MB
             { name: 'hands_solution_simd_opt.data', size: 1 * 1024 * 1024 }, // 约 1MB
+            // 假设还有一个较小的 JS 文件
+            { name: 'hands_solution_simd_opt.js', size: 0.1 * 1024 * 1024 }, // 约 0.1MB
         ];
         const TOTAL_MODEL_SIZE = MODEL_FILES.reduce((sum, file) => sum + file.size, 0);
 
-        // --- 3. 游戏状态与核心对象 (略) ---
+        // --- 3. 游戏状态与核心对象 ---
 
-        let videoElement, loadingOverlay, progressBar, statusText;
+        let videoElement, loadingOverlay;
+        let progressBar, statusText, downloadedSizeText, remainingSizeText; // 新增 DOM 引用
         let scene, camera, renderer, clock;
         let hands, lastDetectionTime = 0;
         let enemies = [];
@@ -97,7 +111,6 @@
         let isReadyToShoot = true; 
         let isGameStarted = false;
         
-        // ... (省略所有 THREE.js Mesh 和 AudioContext 定义，它们保持不变) ...
         const crosshairGeometry = new THREE.SphereGeometry(0.05);
         const crosshairMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 });
         const crosshair = new THREE.Mesh(crosshairGeometry, crosshairMaterial);
@@ -123,9 +136,11 @@
             oscillator.start();
             oscillator.stop(audioContext.currentTime + duration);
         }
-        
-        // ... (省略 initThree, spawnEnemy, updateEnemies, handleShooting, showFloatText 等函数，它们保持不变) ...
-        // 为了简洁，这里只保留 MediaPipe 相关的核心改动。
+
+        /** 辅助函数：将字节转换为 MB 并保留两位小数 */
+        function bytesToMB(bytes) {
+            return (bytes / (1024 * 1024)).toFixed(2);
+        }
 
         // --- 核心：带进度条的模型下载函数 ---
         
@@ -133,8 +148,22 @@
         
         function updateProgress(bytes) {
             bytesDownloaded += bytes;
+            
             const percentage = Math.min(100, (bytesDownloaded / TOTAL_MODEL_SIZE) * 100);
+            const downloadedMB = bytesToMB(bytesDownloaded);
+            const totalMB = bytesToMB(TOTAL_MODEL_SIZE);
+            const remainingMB = bytesToMB(TOTAL_MODEL_SIZE - bytesDownloaded);
+
+            // 更新进度条宽度
             progressBar.style.width = `${percentage}%`;
+
+            // 更新详细文本
+            downloadedSizeText.textContent = `${downloadedMB} MB / ${totalMB} MB`;
+            remainingSizeText.textContent = `剩余: ${remainingMB} MB`;
+            
+            if (percentage >= 100) {
+                statusText.textContent = "模型数据接收完成，正在解析和初始化...";
+            }
         }
 
         /**
@@ -151,11 +180,11 @@
                 throw new Error(`下载失败，状态码: ${response.status}`);
             }
 
-            // MediaPipe 期望返回一个带有 ArrayBuffer 的 Response 对象
             const contentType = response.headers.get('content-type');
             
-            // 如果文件是文本类型，直接返回 text()
+            // 如果文件是文本类型 (如 JS)，直接返回
             if (contentType && contentType.includes('text/javascript')) {
+                 // 文本文件下载通常很快，不计入大模型的进度
                  return response;
             }
 
@@ -169,6 +198,7 @@
                     break;
                 }
                 chunks.push(value);
+                // 每次读取块时更新进度
                 updateProgress(value.length);
             }
 
@@ -192,13 +222,17 @@
         // --- 7. MediaPipe 初始化 (替换加载逻辑) ---
         
         function initMediaPipe() {
+            // 获取 DOM 引用
             progressBar = document.getElementById('progress-bar');
             statusText = document.getElementById('status-text');
+            downloadedSizeText = document.getElementById('downloaded-size');
+            remainingSizeText = document.getElementById('remaining-size');
+            
+            // 初始化进度显示为总大小
+            downloadedSizeText.textContent = `0.00 MB / ${bytesToMB(TOTAL_MODEL_SIZE)} MB`;
+            remainingSizeText.textContent = `剩余: ${bytesToMB(TOTAL_MODEL_SIZE)} MB`;
 
             hands = new Hands({
-                // 1. hands.js 脚本本身使用 jsdelivr (已在 import 处定义)
-
-                // 2. 内部模型文件使用国内镜像 + 进度条加载
                 locateFile: (file) => {
                     return `${MEDIAPIPE_BASE_URL}${file}`;
                 },
@@ -208,11 +242,19 @@
                 }
             });
             
-            // 当所有模型加载和初始化完毕后触发的事件
+            hands.setOptions({
+                maxNumHands: 1,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+
+            hands.onResults(onResults);
+            
+            // 启动初始化和摄像头
             hands.initialize().then(() => {
                 statusText.textContent = "模型加载完成，正在启动摄像头...";
                 
-                // 尝试打开摄像头
                 if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
                     navigator.mediaDevices.getUserMedia({ video: true })
                         .then(stream => {
@@ -236,23 +278,10 @@
                 console.error("MediaPipe 初始化失败:", e);
                 loadingOverlay.innerHTML = `<h1>❌ 模型加载失败</h1><p>请检查网络或镜像源是否有效。错误: ${e.message}</p>`;
             });
-
-
-            hands.setOptions({
-                maxNumHands: 1,
-                modelComplexity: 1,
-                minDetectionConfidence: 0.5,
-                minTrackingConfidence: 0.5
-            });
-
-            hands.onResults(onResults);
         }
         
-        // ... (onResults, detectHands, render 等函数保持不变) ...
+        // --- (其余游戏逻辑函数保持不变，为简洁省略) ---
 
-
-        // 完整的函数定义 (为了简洁，这里将未改动的函数放在末尾，请您确保替换时覆盖所有内容)
-        
         function initThree() {
             scene = new THREE.Scene();
             scene.background = new THREE.Color(0x000000); 
@@ -425,8 +454,6 @@
         function main() {
             videoElement = document.getElementById('webcam');
             loadingOverlay = document.getElementById('loading-overlay');
-            progressBar = document.getElementById('progress-bar');
-            statusText = document.getElementById('status-text');
             clock = new THREE.Clock(false); 
             initThree();
             initMediaPipe();
